@@ -1,0 +1,88 @@
+# Conference Soft Slide Generator (v1 Prototype)
+
+Generates ready-to-project soft slides for LED screens from:
+- a designer's base template (PNG, branding pre-baked in)
+- a designer's mask PNG (one reusable photo-slot shape, e.g. circle/hexagon)
+- session details + speaker info/photos entered by event staff
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Open the local URL Streamlit prints (usually http://localhost:8501).
+
+## How to use
+
+1. **Step 1 — Template & Mask** (do this once per event/theme)
+   - Upload the base template PNG.
+   - Upload a mask PNG: a single shape (circle, hexagon, anything) drawn in
+     white/opaque on a transparent (or dark) background. This defines what
+     shape every speaker photo gets cropped into. Draw only ONE shape — the
+     app reuses it for every speaker slot.
+
+2. **Step 2 — Session Details**
+   - Session name, hall name, date.
+
+3. **Step 3 — Speakers**
+   - Set the speaker count (1 to 8 in this version — see Known Limitations).
+   - For each speaker: name, title, company, whether they're the moderator,
+     and their photo (any size/aspect ratio — phone photos, headshots, etc.
+     all work).
+
+4. **Step 4 — Process & Review**
+   - Click "Process Photos." The app auto-detects each face, crops to a
+     head-to-collar bust shot, and lightly sharpens/enhances it.
+   - **Review the thumbnails.** If a photo couldn't be auto-detected
+     confidently, it's flagged with a warning — re-upload a clearer/more
+     front-facing photo for that speaker and re-process if needed.
+
+5. **Step 5 — Generate**
+   - Click "Generate Slide" to composite everything onto the template.
+   - Download the final PNG.
+
+## What this version does NOT do (by design, for now)
+
+- **No background removal** on speaker photos — backgrounds are kept as
+  submitted, intentionally (per project decision — removal models are
+  unreliable enough on amateur photos that the failure mode looked worse
+  than the problem it solves).
+- **Fixed grid layouts, not true dynamic reflow** — layouts are predefined
+  per speaker count (1 through 8). This was a deliberate v1 simplification
+  to get something working and visually predictable fast. Adding a new
+  count = adding one entry to `core/layout_engine.py`, no other code
+  changes needed. A future version can replace this with true auto-tiling
+  if needed.
+- **Single mask shape only** — if a mask file contains multiple disconnected
+  shapes, the app uses the largest one and warns you. It does not yet
+  support masks with deliberately different shapes per slot.
+- **`CANVAS_TOP_RATIO` is currently a tuned constant** (in
+  `core/slide_compositor.py`), calibrated against the one sample template
+  provided. If a new template has a taller or shorter header band, this
+  will need adjusting (or it'll need to become a per-template setting in
+  the UI) — that's flagged as a near-term follow-up.
+
+## Project structure
+
+```
+app.py                      Streamlit UI (what staff interacts with)
+core/
+  mask_parser.py            Extracts the slot shape from a designer mask PNG
+  photo_processor.py        Face detection, bust crop, sharpen/enhance
+  layout_engine.py          Predefined grid layouts by speaker count
+  slide_compositor.py       Final assembly: template + slots + photos + text
+requirements.txt
+```
+
+## Known rough edges to watch for in testing
+
+- Face detection (OpenCV Haar cascade) is reliable on clear, front-facing
+  photos but can miss side profiles, sunglasses, heavy shadows, or very
+  low-resolution images. This is exactly what the Step 4 review grid is
+  for — it's intentionally a manual checkpoint, not a fully blind pipeline.
+- Long session names, speaker names, or job titles auto-shrink to fit their
+  allotted space rather than truncating — at extreme lengths this may look
+  visually small. Worth testing with your actual longest real-world session
+  titles.
