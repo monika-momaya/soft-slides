@@ -7,6 +7,7 @@ Run with: streamlit run app.py
 """
 
 import io
+import os
 import streamlit as st
 from PIL import Image
 
@@ -14,6 +15,10 @@ from core.mask_parser import load_slot_shape
 from core.layout_engine import get_layout, MAX_SUPPORTED
 from core.photo_processor import process_photo
 from core.slide_compositor import compose_slide, SpeakerInfo
+from core.speaker_sheet import read_speaker_sheet
+from core.name_matcher import match_photos_to_speakers
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 st.set_page_config(page_title="Soft Slide Generator", layout="wide")
 
@@ -87,32 +92,104 @@ with c3:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# STEP 3: Speakers (bulk entry)
+# STEP 3: Speakers (bulk Excel + bulk photo upload, with fuzzy matching)
 # ---------------------------------------------------------------------------
 st.header("3. Speakers")
 
-if "num_speakers" not in st.session_state:
-    st.session_state.num_speakers = 3
-
-num_speakers = st.number_input(
-    f"Number of speakers (moderator + panelists combined, max {MAX_SUPPORTED} supported)",
-    min_value=1, max_value=MAX_SUPPORTED, value=st.session_state.num_speakers, step=1,
+entry_mode = st.radio(
+    "How would you like to enter speaker details?",
+    ["Bulk upload (Excel + photos)", "Manual entry (type each speaker)"],
+    horizontal=True,
 )
-st.session_state.num_speakers = num_speakers
 
-speaker_inputs = []
-for i in range(num_speakers):
-    with st.expander(f"Speaker {i+1}", expanded=(i < 3)):
-        cols = st.columns([2, 2, 2, 1, 1])
-        name = cols[0].text_input("Name", key=f"name_{i}")
-        title = cols[1].text_input("Title", key=f"title_{i}")
-        company = cols[2].text_input("Company", key=f"company_{i}")
-        is_moderator = cols[3].checkbox("Moderator?", key=f"mod_{i}")
-        photo = cols[4].file_uploader("Photo", type=["jpg", "jpeg", "png"], key=f"photo_{i}")
-        speaker_inputs.append({
-            "name": name, "title": title, "company": company,
-            "is_moderator": is_moderator, "photo_file": photo,
-        })
+speaker_inputs = []  # final list of dicts: name, title, company, is_moderator, photo_bytes
+
+if entry_mode == "Bulk upload (Excel + photos)":
+    template_path = os.path.join(APP_DIR, "assets", "speaker_list_template.xlsx")
+    with open(template_path, "rb") as f:
+        st.download_button(
+            "⬇️ Download Excel template", data=f.read(),
+            file_name="speaker_list_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    excel_file = st.file_uploader(
+        "Upload filled speaker list (.xlsx)", type=["xlsx"], key="excel_upload"
+    )
+    photo_files = st.file_uploader(
+        "Bulk upload speaker photos — filename should contain the speaker's name "
+        "in some form (e.g. 'ravi_singh.jpg', 'Singh Ravi.png' — order/case/separators don't matter)",
+        type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="bulk_photos",
+    )
+
+    speaker_rows = None
+    if excel_file is not None:
+        try:
+            speaker_rows = read_speaker_sheet(excel_file)
+            st.success(f"Loaded {len(speaker_rows)} speaker(s) from the sheet.")
+        except ValueError as e:
+            st.error(str(e))
+
+    if speaker_rows and photo_files:
+        names = [r["name"] for r in speaker_rows]
+        filenames = [pf.name for pf in photo_files]
+        match_results = match_photos_to_speakers(names, filenames)
+        filename_to_file = {pf.name: pf for pf in photo_files}
+
+        st.subheader("Review photo matches")
+        st.caption("Auto-matched by filename similarity. Fix any incorrect or missing matches below before continuing.")
+
+        all_filenames_options = ["(no photo)"] + filenames
+        final_matches = []
+        for i, (row, match) in enumerate(zip(speaker_rows, match_results)):
+            cols = st.columns([3, 2, 2])
+            cols[0].markdown(f"**{row['name']}**" + (" 🎤 _Moderator_" if row["is_moderator"] else ""))
+
+            default_choice = match.matched_filename if match.matched_filename in filenames else "(no photo)"
+            chosen = cols[1].selectbox(
+                "Matched photo", options=all_filenames_options,
+                index=all_filenames_options.index(default_choice),
+                key=f"match_select_{i}",
+                label_visibility="collapsed",
+            )
+            if chosen != "(no photo)":
+                cols[2].image(filename_to_file[chosen], width=70)
+                if match.needs_review and chosen == match.matched_filename:
+                    cols[2].caption("⚠️ low-confidence auto-match — please verify")
+            else:
+                cols[2].caption("No photo assigned")
+
+            final_matches.append({**row, "photo_file": filename_to_file.get(chosen)})
+
+        speaker_inputs = final_matches
+
+        unmatched_photos = [f for f in filenames if f not in [m["photo_file"].name for m in final_matches if m["photo_file"]]]
+        if unmatched_photos:
+            st.info(f"{len(unmatched_photos)} uploaded photo(s) were not assigned to any speaker: "
+                     + ", ".join(unmatched_photos))
+
+else:
+    if "num_speakers" not in st.session_state:
+        st.session_state.num_speakers = 3
+
+    num_speakers = st.number_input(
+        f"Number of speakers (max {MAX_SUPPORTED} supported)",
+        min_value=1, max_value=MAX_SUPPORTED, value=st.session_state.num_speakers, step=1,
+    )
+    st.session_state.num_speakers = num_speakers
+
+    for i in range(num_speakers):
+        with st.expander(f"Speaker {i+1}", expanded=(i < 3)):
+            cols = st.columns([2, 2, 2, 1, 1])
+            name = cols[0].text_input("Name", key=f"name_{i}")
+            title = cols[1].text_input("Title", key=f"title_{i}")
+            company = cols[2].text_input("Company", key=f"company_{i}")
+            is_moderator = cols[3].checkbox("Moderator?", key=f"mod_{i}")
+            photo = cols[4].file_uploader("Photo", type=["jpg", "jpeg", "png"], key=f"photo_{i}")
+            speaker_inputs.append({
+                "name": name, "title": title, "company": company,
+                "is_moderator": is_moderator, "photo_file": photo,
+            })
 
 st.divider()
 
@@ -121,10 +198,12 @@ st.divider()
 # ---------------------------------------------------------------------------
 st.header("4. Process & Review Photos")
 
-if st.button("🔄 Process Photos", type="primary"):
+if st.button("🔄 Process Photos", type="primary", disabled=not speaker_inputs):
     missing_photos = [s for s in speaker_inputs if s["photo_file"] is None]
     if missing_photos:
-        st.error(f"{len(missing_photos)} speaker(s) are missing a photo upload. Please add all photos first.")
+        names_list = ", ".join(s["name"] for s in missing_photos)
+        st.error(f"These speaker(s) have no photo assigned: {names_list}. "
+                  "Please assign a photo for every speaker before processing.")
     else:
         processed = []
         for s in speaker_inputs:

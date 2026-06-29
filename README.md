@@ -27,10 +27,22 @@ Open the local URL Streamlit prints (usually http://localhost:8501).
    - Session name, hall name, date.
 
 3. **Step 3 — Speakers**
-   - Set the speaker count (1 to 8 in this version — see Known Limitations).
-   - For each speaker: name, title, company, whether they're the moderator,
-     and their photo (any size/aspect ratio — phone photos, headshots, etc.
-     all work).
+   - Choose **Bulk upload** (recommended for most sessions) or **Manual entry**
+     (fine for 1-2 speakers).
+   - **Bulk upload:**
+     - Download the Excel template, fill in `Name`, `Title`, `Company`,
+       `Moderator (Y/N)` — one row per speaker.
+     - Bulk-upload all speaker photos at once. Filenames don't need to match
+       exactly — `ravi_singh.jpg`, `Singh_Ravi.PNG`, `Singh, Ravi.jpg` all
+       match "Ravi Singh" automatically (matching ignores order, case,
+       separators, and common honorifics like Dr./Shri/IRS).
+     - **Review the match table** that appears — every speaker shows its
+       auto-matched photo. Low-confidence matches are flagged; use the
+       dropdown to fix any wrong or missing match before continuing. This
+       review step exists specifically so a bad auto-match never goes
+       through silently.
+   - **Manual entry:** same as before — type each speaker's details and
+     upload their photo individually.
 
 4. **Step 4 — Process & Review**
    - Click "Process Photos." The app auto-detects each face, crops to a
@@ -73,6 +85,10 @@ core/
   photo_processor.py        Face detection, bust crop, sharpen/enhance
   layout_engine.py          Predefined grid layouts by speaker count
   slide_compositor.py       Final assembly: template + slots + photos + text
+  speaker_sheet.py          Reads the speaker Excel sheet
+  name_matcher.py           Fuzzy-matches photo filenames to speaker names
+assets/
+  speaker_list_template.xlsx  Downloadable Excel template for bulk speaker entry
 requirements.txt
 ```
 
@@ -86,3 +102,11 @@ requirements.txt
   allotted space rather than truncating — at extreme lengths this may look
   visually small. Worth testing with your actual longest real-world session
   titles.
+- **Fuzzy name matching** works well for typical cases (reordered names,
+  different separators/case, common honorific suffixes like "IRS"/"Dr.")
+  but isn't magic — completely generic filenames (`IMG_2024.jpg`) or two
+  speakers with very similar names sharing a first or last name can produce
+  an ambiguous or empty match. The Step 3 review table is the safety net:
+  always glance over the assigned photo next to each name before moving on,
+  since a wrong photo-to-name assignment going live on the big screen is
+  the one mistake worth double-checking for.
