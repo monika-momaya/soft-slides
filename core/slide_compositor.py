@@ -61,6 +61,12 @@ SPEAKER_NAME_PT = 18        # "4pt larger than title/company" -> title/company =
 TITLE_COMPANY_PT = 14
 ROLE_LABEL_PT = 13
 
+# Role values that are treated as "no special role" and therefore NOT shown
+# as a label above the speaker's photo - matches the convention in the
+# reference slides, where only notable roles (Moderator, Chief Guest, etc.)
+# get a label and ordinary panelists/speakers don't.
+DEFAULT_LABEL_VALUES_TO_HIDE = {"speaker", "panelist", ""}
+
 
 @dataclass
 class SpeakerInfo:
@@ -68,7 +74,12 @@ class SpeakerInfo:
     title: str = ""
     company: str = ""
     photo: Optional[Image.Image] = None   # already-processed bust crop (RGB)
-    role_label: str = ""                  # overrides slot's default role_label if set
+    role_label: str = ""                  # free text, e.g. "Moderator", "Chief Guest",
+                                           # "Keynote Speaker". Default-ish values like
+                                           # "Speaker"/"Panelist" are NOT shown as a label
+                                           # above the photo (matches reference slide
+                                           # convention - only notable roles get a label).
+                                           # See DEFAULT_LABEL_VALUES_TO_HIDE below.
 
 
 def _pt_to_px(pt: float, template_width: int) -> int:
@@ -307,7 +318,7 @@ def compose_slide(
         slot_w = int(slot.w * W)
         slot_h = int(slot.h * canvas_height)
 
-        role_text = speaker.role_label or slot.role_label
+        role_text = speaker.role_label if speaker.role_label.strip().lower() not in DEFAULT_LABEL_VALUES_TO_HIDE else ""
 
         # Reserve a portion of the slot's allotted height for the photo and
         # leave the rest for the caption stack (name + title + company),

@@ -12,11 +12,12 @@ import streamlit as st
 from PIL import Image
 
 from core.mask_parser import load_slot_shape
-from core.layout_engine import get_layout, MAX_SUPPORTED
+from core.layout_engine import get_layout, MAX_SUPPORTED, sort_speakers_moderator_first
 from core.photo_processor import process_photo
 from core.slide_compositor import compose_slide, SpeakerInfo
-from core.speaker_sheet import read_speaker_sheet
+from core.speaker_sheet import read_speaker_sheet, DEFAULT_ROLE_LABEL
 from core.name_matcher import match_photos_to_speakers
+from core.pptx_compositor import new_presentation, build_pptx_slide, save_pptx
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -29,6 +30,8 @@ if "processed_speakers" not in st.session_state:
     st.session_state.processed_speakers = None   # list of dicts after "Process Photos"
 if "final_slide" not in st.session_state:
     st.session_state.final_slide = None
+if "final_pptx_bytes" not in st.session_state:
+    st.session_state.final_pptx_bytes = None
 
 st.title("🖥️ Conference Soft Slide Generator")
 st.caption("Upload a template + mask once per event. Generate as many session slides as you need.")
@@ -102,7 +105,7 @@ entry_mode = st.radio(
     horizontal=True,
 )
 
-speaker_inputs = []  # final list of dicts: name, title, company, is_moderator, photo_bytes
+speaker_inputs = []  # final list of dicts: name, title, company, role, photo_bytes
 
 if entry_mode == "Bulk upload (Excel + photos)":
     template_path = os.path.join(APP_DIR, "assets", "speaker_list_template.xlsx")
@@ -143,7 +146,7 @@ if entry_mode == "Bulk upload (Excel + photos)":
         final_matches = []
         for i, (row, match) in enumerate(zip(speaker_rows, match_results)):
             cols = st.columns([3, 2, 2])
-            cols[0].markdown(f"**{row['name']}**" + (" 🎤 _Moderator_" if row["is_moderator"] else ""))
+            cols[0].markdown(f"**{row['name']}**" + (f" _({row['role']})_" if row.get("role") else ""))
 
             default_choice = match.matched_filename if match.matched_filename in filenames else "(no photo)"
             chosen = cols[1].selectbox(
@@ -180,15 +183,18 @@ else:
 
     for i in range(num_speakers):
         with st.expander(f"Speaker {i+1}", expanded=(i < 3)):
-            cols = st.columns([2, 2, 2, 1, 1])
+            cols = st.columns([2, 2, 2, 2, 1])
             name = cols[0].text_input("Name", key=f"name_{i}")
             title = cols[1].text_input("Title", key=f"title_{i}")
             company = cols[2].text_input("Company", key=f"company_{i}")
-            is_moderator = cols[3].checkbox("Moderator?", key=f"mod_{i}")
+            role = cols[3].text_input(
+                "Role label (optional)", key=f"role_{i}",
+                placeholder="e.g. Moderator, Chief Guest — blank = Speaker",
+            )
             photo = cols[4].file_uploader("Photo", type=["jpg", "jpeg", "png"], key=f"photo_{i}")
             speaker_inputs.append({
                 "name": name, "title": title, "company": company,
-                "is_moderator": is_moderator, "photo_file": photo,
+                "role": role.strip() or DEFAULT_ROLE_LABEL, "photo_file": photo,
             })
 
 st.divider()
@@ -205,26 +211,53 @@ if st.button("🔄 Process Photos", type="primary", disabled=not speaker_inputs)
         st.error(f"These speaker(s) have no photo assigned: {names_list}. "
                   "Please assign a photo for every speaker before processing.")
     else:
+        # Default order: moderator/chair first (matches reference slide
+        # convention), preserving relative order otherwise. Staff can
+        # still manually reorder afterward using the controls below.
+        ordered_inputs = sort_speakers_moderator_first(speaker_inputs)
         processed = []
-        for s in speaker_inputs:
+        for s in ordered_inputs:
             raw_img = Image.open(s["photo_file"])
             result = process_photo(raw_img)
             processed.append({**s, "processed_image": result.image,
                                "face_detected": result.face_detected, "note": result.note})
         st.session_state.processed_speakers = processed
         st.session_state.final_slide = None  # reset downstream state
+        st.session_state.final_pptx_bytes = None
 
 if st.session_state.processed_speakers:
     st.subheader("Review processed photos before generating the final slide")
-    review_cols = st.columns(min(len(st.session_state.processed_speakers), 5))
+    st.caption(
+        "Default order places Moderator/Chair first. Use the ↑ / ↓ buttons "
+        "to rearrange speakers into your preferred order before generating."
+    )
+
+    speakers_list = st.session_state.processed_speakers
     needs_attention = False
-    for i, sp in enumerate(st.session_state.processed_speakers):
+
+    review_cols = st.columns(min(len(speakers_list), 5))
+    for i, sp in enumerate(speakers_list):
         col = review_cols[i % len(review_cols)]
         with col:
             st.image(sp["processed_image"], caption=sp["name"] or f"Speaker {i+1}", width=150)
             if not sp["face_detected"]:
                 st.warning("⚠️ " + sp["note"])
                 needs_attention = True
+
+            btn_cols = st.columns(2)
+            if btn_cols[0].button("↑ Up", key=f"up_{i}", disabled=(i == 0), use_container_width=True):
+                speakers_list[i - 1], speakers_list[i] = speakers_list[i], speakers_list[i - 1]
+                st.session_state.processed_speakers = speakers_list
+                st.session_state.final_slide = None
+                st.session_state.final_pptx_bytes = None
+                st.rerun()
+            if btn_cols[1].button("↓ Down", key=f"down_{i}", disabled=(i == len(speakers_list) - 1), use_container_width=True):
+                speakers_list[i + 1], speakers_list[i] = speakers_list[i], speakers_list[i + 1]
+                st.session_state.processed_speakers = speakers_list
+                st.session_state.final_slide = None
+                st.session_state.final_pptx_bytes = None
+                st.rerun()
+
     if needs_attention:
         st.info(
             "Some photos couldn't be auto-cropped confidently. You can still proceed, "
@@ -244,27 +277,62 @@ ready = template_img is not None and slot_shape is not None and st.session_state
 if not ready:
     st.info("Complete steps 1-4 above (template, mask, session details, and processed photos) to generate the slide.")
 
+output_format = st.radio(
+    "Output format",
+    ["PowerPoint (.pptx) — editable, recommended", "PNG image — flat, view-only"],
+    horizontal=True,
+)
+
 if st.button("✨ Generate Slide", disabled=not ready, type="primary"):
     try:
         layout_slots = get_layout(len(st.session_state.processed_speakers))
-        speaker_infos = []
-        for sp in st.session_state.processed_speakers:
-            role = "MODERATOR" if sp["is_moderator"] else ""
-            speaker_infos.append(SpeakerInfo(
-                name=sp["name"], title=sp["title"], company=sp["company"],
-                photo=sp["processed_image"], role_label=role,
-            ))
-        final = compose_slide(
-            template=template_img, slot_shape=slot_shape, slots=layout_slots,
-            speakers=speaker_infos, session_name=session_name,
-            hall_name=hall_name, date_str=date_str,
-        )
-        st.session_state.final_slide = final
+
+        if output_format.startswith("PowerPoint"):
+            speaker_dicts = [
+                {
+                    "name": sp["name"], "title": sp["title"], "company": sp["company"],
+                    "role": sp.get("role", DEFAULT_ROLE_LABEL), "photo": sp["processed_image"],
+                }
+                for sp in st.session_state.processed_speakers
+            ]
+            prs = new_presentation()
+            build_pptx_slide(
+                prs, template=template_img, slot_shape=slot_shape, slots=layout_slots,
+                speakers=speaker_dicts, session_name=session_name,
+                hall_name=hall_name, date_str=date_str,
+            )
+            pptx_buf = io.BytesIO()
+            prs.save(pptx_buf)
+            st.session_state.final_pptx_bytes = pptx_buf.getvalue()
+            st.session_state.final_slide = None
+        else:
+            speaker_infos = [
+                SpeakerInfo(
+                    name=sp["name"], title=sp["title"], company=sp["company"],
+                    photo=sp["processed_image"], role_label=sp.get("role", DEFAULT_ROLE_LABEL),
+                )
+                for sp in st.session_state.processed_speakers
+            ]
+            final = compose_slide(
+                template=template_img, slot_shape=slot_shape, slots=layout_slots,
+                speakers=speaker_infos, session_name=session_name,
+                hall_name=hall_name, date_str=date_str,
+            )
+            st.session_state.final_slide = final
+            st.session_state.final_pptx_bytes = None
     except ValueError as e:
         st.error(str(e))
 
+if st.session_state.final_pptx_bytes is not None:
+    st.success("PowerPoint generated — every text box and photo is editable in PowerPoint.")
+    st.download_button(
+        "⬇️ Download Slide (PPTX)", data=st.session_state.final_pptx_bytes,
+        file_name=f"{(session_name or 'soft_slide').replace(' ', '_')}.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+
 if st.session_state.final_slide is not None:
-    st.subheader("Final Slide")
+    st.subheader("Final Slide (PNG preview)")
     st.image(st.session_state.final_slide, use_container_width=True)
 
     buf = io.BytesIO()

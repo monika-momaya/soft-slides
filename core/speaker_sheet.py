@@ -4,19 +4,27 @@ speaker_sheet.py
 Reads the speaker list Excel file into a plain list of dicts the rest of
 the app can use.
 
-Per project decision: column headers are NOT enforced to be exact matches
-("Name", "Title", "Company", "Moderator (Y/N)"). Staff may upload sheets
-with differently worded headers - this module auto-detects which column
-means what by matching against known synonyms, so the same flexible
-approach used for photo-filename matching applies here too: automate the
-matching, don't make staff conform to a rigid format.
+Per project decision: column headers are NOT enforced to be exact matches.
+Staff may upload sheets with differently worded headers - this module
+auto-detects which column means what by matching against known synonyms.
+
+Per a later project decision, the old "Moderator (Y/N)" boolean column is
+replaced with an open-ended ROLE column. Staff can write anything
+descriptive there - "Moderator", "Chief Guest", "Keynote Speaker", "Event
+Inauguration by", etc. Whatever text is present is used VERBATIM as the
+label shown above that speaker's photo. If the cell is left blank, the
+speaker defaults to a generic "Speaker" label (the rest of the app may
+display this as "Panelist" in multi-speaker contexts - see DEFAULT_ROLE_LABEL).
 
 Recognized column meanings:
 - name        (required)       - synonyms: name, speaker, speaker name, full name, panelist
-- title       (optional)       - synonyms: title, designation, role, position
+- title       (optional)       - synonyms: title, designation, position  (NOTE: "role" is
+                                  intentionally NOT a synonym here anymore - it now means
+                                  the open-ended role/label column instead, see below)
 - company     (optional)       - synonyms: company, organisation, organization, affiliation, firm
-- moderator   (optional)       - synonyms: moderator, chair, moderator/chair, is moderator, role type
-                                  (value is treated as a flag, not free text - see _looks_like_moderator)
+- role        (optional)       - synonyms: role, moderator, chair, designation type, label,
+                                  speaker role, session role
+                                  Free text, used AS-IS as the on-slide label. Blank = default.
 
 If a column's meaning can't be confidently determined, it's ignored
 (not treated as an error) - only a missing NAME column is fatal, since
@@ -27,17 +35,18 @@ import re
 from typing import List, Dict, Optional
 import pandas as pd
 
+DEFAULT_ROLE_LABEL = "Speaker"
+
 # Each column "meaning" maps to a list of normalized keyword patterns we'll
 # look for in the actual header text. Order matters slightly: more specific
 # synonyms first, since we match by "any keyword appears in the header".
 COLUMN_SYNONYMS = {
     "name": ["speaker name", "full name", "panelist name", "name", "speaker", "panelist"],
-    "title": ["designation", "job title", "title", "role", "position"],
+    "title": ["job title", "designation", "title", "position"],
     "company": ["organisation", "organization", "affiliation", "company", "firm", "employer"],
-    "moderator": ["moderator/chair", "moderator", "chair", "is moderator", "role type"],
+    "role": ["session role", "speaker role", "designation type", "moderator/chair",
+             "role type", "role", "moderator", "chair", "label"],
 }
-
-MODERATOR_TRUE_VALUES = {"y", "yes", "moderator", "chair", "true", "1"}
 
 
 def _normalize_header(header: str) -> str:
@@ -51,9 +60,8 @@ def _detect_column_mapping(columns: List[str]) -> Dict[str, Optional[str]]:
     sheet (or None if no matching column was found for that meaning).
 
     A column can only be claimed by ONE meaning. To avoid a generic synonym
-    (like "title"'s "role") incorrectly grabbing a column meant for a more
-    specific synonym (like "moderator"'s "role type"), matching happens in
-    two passes:
+    incorrectly grabbing a column meant for a more specific synonym (e.g.
+    plain "role" vs. "role type"), matching happens in two passes:
       1. Multi-word / more specific synonyms across ALL meanings first
          (e.g. "role type", "speaker name", "job title").
       2. Single, more generic synonyms next (e.g. "role", "name", "title").
@@ -83,10 +91,6 @@ def _detect_column_mapping(columns: List[str]) -> Dict[str, Optional[str]]:
     return mapping
 
 
-def _looks_like_moderator(value: str) -> bool:
-    return value.strip().lower() in MODERATOR_TRUE_VALUES
-
-
 def _safe_str(value) -> str:
     """Safely convert a pandas cell value to a stripped string, handling
     NaN (pandas' representation of blank cells, which is a float, not a
@@ -99,7 +103,11 @@ def _safe_str(value) -> str:
 def read_speaker_sheet(file_path_or_buffer) -> List[Dict]:
     """
     Reads the uploaded Excel file and returns a list of speaker dicts:
-    [{"name": ..., "title": ..., "company": ..., "is_moderator": bool}, ...]
+    [{"name": ..., "title": ..., "company": ..., "role": ...}, ...]
+
+    "role" is the free-text label to display above the speaker's photo
+    (e.g. "Moderator", "Chief Guest", "Keynote Speaker") - taken verbatim
+    from the sheet, or DEFAULT_ROLE_LABEL if the cell was blank.
 
     Column headers are matched by MEANING, not exact text - see module
     docstring. Rows with a blank name are skipped (treated as empty
@@ -126,13 +134,13 @@ def read_speaker_sheet(file_path_or_buffer) -> List[Dict]:
 
         title = _safe_str(row.get(mapping["title"])) if mapping["title"] else ""
         company = _safe_str(row.get(mapping["company"])) if mapping["company"] else ""
-        mod_raw = _safe_str(row.get(mapping["moderator"])) if mapping["moderator"] else ""
+        role = _safe_str(row.get(mapping["role"])) if mapping["role"] else ""
 
         speakers.append({
             "name": name,
             "title": title,
             "company": company,
-            "is_moderator": _looks_like_moderator(mod_raw),
+            "role": role or DEFAULT_ROLE_LABEL,
         })
 
     if not speakers:
