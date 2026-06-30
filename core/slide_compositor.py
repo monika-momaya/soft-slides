@@ -6,13 +6,29 @@ the layout (slot positions), processed speaker photos, and text fields
 (session name, hall, date, speaker name/title/company) and renders the
 finished, ready-to-project slide.
 
-Design choices baked in here:
-- Text is auto-sized to fit within its allotted width (so long names/titles
-  don't overflow), shrinking font size as needed rather than truncating.
-- The "open canvas area" (where speakers go) is assumed to start below the
-  branded header band. This boundary is currently a configurable constant
-  (CANVAS_TOP_RATIO) - in production this should be confirmed against the
-  real template or made designer-configurable per template.
+Font sizing convention:
+- Sizes are specified in "pt", matching how these slides are normally
+  authored in PowerPoint at a 1280x720 (96 DPI) reference canvas - i.e.
+  the same assumption PowerPoint/web use for on-screen pt sizing, NOT a
+  print-points conversion. 1pt = 1.3333px at that reference resolution.
+- The actual template image may be a different resolution (e.g. 1616x910),
+  so pt sizes are scaled by (template_width / 1280) to stay visually
+  consistent with how they'd look authored in PowerPoint, regardless of
+  the exported template's pixel dimensions.
+
+Text styling rules (per project spec):
+- Session name: bold, 20pt ideal, never auto-shrunk below 16pt. If still
+  too long at 16pt, it wraps to a second line rather than shrinking further
+  or being cut off - it must never become illegibly small.
+- Speaker name: bold, vibrant/theme-aware accent color, sized 4pt LARGER
+  than the title/company line (not just "less small").
+- Title + Company: regular weight (not bold), no special color - follows
+  the same light/dark text logic as the rest of the template's theme,
+  sized 3pt smaller than the speaker name.
+- All template-text coloring (session name, captions) is auto-detected
+  per template: a region's average brightness decides whether to use
+  light or dark, theme-appropriate text colors - no manual flag needed,
+  since templates change per event.
 """
 
 from dataclasses import dataclass
@@ -21,21 +37,29 @@ from PIL import Image, ImageDraw, ImageFont
 
 from core.layout_engine import Slot
 from core.mask_parser import SlotShape
+from core.theme_detector import detect_theme
 
 # Fraction of the template's height taken up by the fixed branded header
 # (logo/date/banner band). Below this is the open canvas for speakers.
-# Measured against the actual sample template (header band ends ~273px
-# of 910px total height = 0.30); small extra margin added below it.
-# NOTE: this should be made configurable per template in the UI, since
-# different designer templates will have different header heights.
+# NOTE: tuned against the one sample template provided; ideally this
+# becomes auto-detected or per-template configurable in a future pass.
 CANVAS_TOP_RATIO = 0.32
 
-CAPTION_GAP_PX = 10          # gap between photo bottom and name text
-NAME_TO_TITLE_GAP_PX = 2
-TITLE_TO_COMPANY_GAP_PX = 0
+CAPTION_GAP_PX_RATIO = 0.012      # gap between photo bottom and name text, as a fraction of template height
+NAME_TO_TITLE_GAP_RATIO = 0.004
+TITLE_TO_COMPANY_GAP_RATIO = 0.0
 
-TEXT_COLOR = (255, 255, 255, 255)
-ROLE_LABEL_COLOR = (255, 210, 60, 255)   # amber, matches "MODERATOR"/"PANELISTS" style seen in samples
+# --- PPT-equivalent pt sizing rules ---
+REFERENCE_WIDTH_PX = 1280   # PowerPoint 16:9 standard slide width at 96 DPI
+PT_TO_PX_AT_REFERENCE = 1.3333  # 96 DPI: 1pt = 1.3333px, same convention as PowerPoint/web
+
+SESSION_NAME_IDEAL_PT = 20
+SESSION_NAME_MIN_PT = 16
+META_LINE_PT = 13
+
+SPEAKER_NAME_PT = 18        # "4pt larger than title/company" -> title/company = 14pt
+TITLE_COMPANY_PT = 14
+ROLE_LABEL_PT = 13
 
 
 @dataclass
@@ -47,11 +71,22 @@ class SpeakerInfo:
     role_label: str = ""                  # overrides slot's default role_label if set
 
 
-def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+def _pt_to_px(pt: float, template_width: int) -> int:
     """
-    Load a font at the given size. Falls back through a few common paths
-    so this works across different environments without bundling font files.
-    Production deployments should bundle a specific brand-approved font.
+    Convert a PowerPoint-style pt size to pixels, scaled to the template's
+    actual resolution so it looks the same as it would authored at the
+    standard 1280px-wide 16:9 PowerPoint reference canvas.
+    """
+    scale = template_width / REFERENCE_WIDTH_PX
+    return max(1, round(pt * PT_TO_PX_AT_REFERENCE * scale))
+
+
+def _font(size_px: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    """
+    Load a font at the given pixel size. Falls back through a few common
+    paths so this works across different environments without bundling
+    font files. Production deployments should bundle a specific
+    brand-approved font.
     """
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
@@ -61,10 +96,33 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     ]
     for path in candidates:
         try:
-            return ImageFont.truetype(path, size)
+            return ImageFont.truetype(path, size_px)
         except (OSError, IOError):
             continue
     return ImageFont.load_default()
+
+
+def _text_width(draw, text, font) -> int:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0]
+
+
+def _wrap_to_fit(draw, text, font, max_width: int) -> List[str]:
+    """Greedy word-wrap text into lines that each fit within max_width."""
+    words = text.split()
+    if not words:
+        return [""]
+    lines = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        if _text_width(draw, candidate, font) <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
 
 
 def _fit_text_font(draw: ImageDraw.ImageDraw, text: str, max_width: int,
@@ -73,18 +131,35 @@ def _fit_text_font(draw: ImageDraw.ImageDraw, text: str, max_width: int,
     size = start_size
     while size > min_size:
         font = _font(size, bold=bold)
-        bbox = draw.textbbox((0, 0), text, font=font)
-        if (bbox[2] - bbox[0]) <= max_width:
+        if _text_width(draw, text, font) <= max_width:
             return font
         size -= 1
     return _font(min_size, bold=bold)
 
 
-def _draw_centered_text(draw, text, center_x, top_y, max_width, start_size, min_size, color, bold=False):
-    """Draw text horizontally centered at center_x, returns the height used."""
+def _draw_centered_text(draw, text, center_x, top_y, font, color, max_width=None,
+                         min_size_px=None, bold=False):
+    """
+    Draw text horizontally centered at center_x on a SINGLE line, returns
+    the height used. If max_width is given and the text overflows it, the
+    font is shrunk down (never wrapped) until it fits, or until min_size_px
+    is hit - whichever comes first. Single-line-only is a deliberate choice:
+    wrapping speaker captions in fixed-grid layouts risks colliding with the
+    next row, so a slightly smaller name is preferred over an unpredictable
+    multi-line block.
+    """
     if not text:
         return 0
-    font = _fit_text_font(draw, text, max_width, start_size, min_size, bold=bold)
+
+    if max_width is not None and _text_width(draw, text, font) > max_width:
+        size = font.size
+        floor = min_size_px or max(10, int(size * 0.6))
+        while size > floor:
+            size -= 1
+            font = _font(size, bold=bold)
+            if _text_width(draw, text, font) <= max_width:
+                break
+
     bbox = draw.textbbox((0, 0), text, font=font)
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
@@ -92,33 +167,57 @@ def _draw_centered_text(draw, text, center_x, top_y, max_width, start_size, min_
     return text_h
 
 
-def _apply_mask_shape(photo: Image.Image, slot_shape: SlotShape, target_w: int, target_h: int) -> Image.Image:
+def _apply_mask_shape(photo: Image.Image, slot_shape: SlotShape, available_w: int, available_h: int) -> Image.Image:
     """
-    Resize the photo to cover the target box (cropping to fill, like
-    CSS object-fit: cover) and apply the slot's alpha mask shape so it's
-    cut to circle/hexagon/whatever the designer drew.
+    Fits the slot shape (preserving ITS OWN aspect ratio - e.g. a circle
+    must stay a circle, not become an oval) within the available
+    (available_w, available_h) box, centers it, then crops/resizes the
+    speaker photo to "cover" that shape (like CSS object-fit: cover)
+    before applying the mask.
+
+    Returns an RGBA image sized (available_w, available_h) with the
+    masked photo centered and transparent padding around it - safe to
+    paste directly at the slot's top-left corner.
     """
+    # Fit the shape's native aspect ratio within the available box
+    shape_ratio = slot_shape.aspect_ratio
+    box_ratio = available_w / available_h
+
+    if shape_ratio > box_ratio:
+        # shape is relatively wider than the box -> width is the binding constraint
+        shape_w = available_w
+        shape_h = int(round(shape_w / shape_ratio))
+    else:
+        shape_h = available_h
+        shape_w = int(round(shape_h * shape_ratio))
+
+    offset_x = (available_w - shape_w) // 2
+    offset_y = (available_h - shape_h) // 2
+
+    # Resize photo to "cover" the shape's box (crop to fill, preserving photo aspect)
     photo_ratio = photo.width / photo.height
-    target_ratio = target_w / target_h
+    target_ratio = shape_w / shape_h
 
     if photo_ratio > target_ratio:
-        # photo is wider than target -> match height, crop width
-        new_h = target_h
+        new_h = shape_h
         new_w = int(new_h * photo_ratio)
     else:
-        new_w = target_w
+        new_w = shape_w
         new_h = int(new_w / photo_ratio)
 
     resized = photo.resize((new_w, new_h), Image.LANCZOS)
-    left = (new_w - target_w) // 2
-    top = (new_h - target_h) // 2
-    cropped = resized.crop((left, top, left + target_w, top + target_h))
+    crop_left = (new_w - shape_w) // 2
+    crop_top = (new_h - shape_h) // 2
+    cropped = resized.crop((crop_left, crop_top, crop_left + shape_w, crop_top + shape_h))
 
-    mask_resized = slot_shape.resized(target_w, target_h)
+    mask_resized = slot_shape.resized(shape_w, shape_h)
 
-    result = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
-    result.paste(cropped.convert("RGBA"), (0, 0))
-    result.putalpha(mask_resized)
+    masked_shape = Image.new("RGBA", (shape_w, shape_h), (0, 0, 0, 0))
+    masked_shape.paste(cropped.convert("RGBA"), (0, 0))
+    masked_shape.putalpha(mask_resized)
+
+    result = Image.new("RGBA", (available_w, available_h), (0, 0, 0, 0))
+    result.paste(masked_shape, (offset_x, offset_y), masked_shape)
     return result
 
 
@@ -145,22 +244,63 @@ def compose_slide(
     draw = ImageDraw.Draw(canvas)
 
     canvas_top = int(H * CANVAS_TOP_RATIO)
-    title_reserved_height = 70 if (session_name or hall_name or date_str) else 0
-    speaker_area_top = canvas_top + title_reserved_height
-    canvas_height = H - speaker_area_top
+
+    # Sample the template's own colors near the title area and the speaker
+    # caption area separately - a template could plausibly have a light
+    # header and a darker open canvas (or vice versa), so we detect each
+    # region independently rather than assuming one theme for the whole slide.
+    title_theme = detect_theme(template, (0, canvas_top, W, min(H, canvas_top + int(H * 0.12))))
+    caption_theme = detect_theme(template, (0, canvas_top + int(H * 0.15), W, H))
+
+    caption_gap_px = int(H * CAPTION_GAP_PX_RATIO)
+    name_to_title_gap_px = int(H * NAME_TO_TITLE_GAP_RATIO)
+    title_to_company_gap_px = int(H * TITLE_TO_COMPANY_GAP_RATIO)
 
     # --- Session title block (top-left of open canvas) ---
+    # Bold, 20pt ideal, never auto-shrunk below 16pt - wraps to a second
+    # line instead of shrinking further, so it never becomes illegible.
+    title_reserved_height = 0
     if session_name:
-        title_font = _fit_text_font(draw, session_name, int(W * 0.94), 32, 18, bold=True)
-        draw.text((int(W * 0.03), canvas_top + 4), session_name, font=title_font, fill=TEXT_COLOR)
+        max_title_width = int(W * 0.94)
+        ideal_px = _pt_to_px(SESSION_NAME_IDEAL_PT, W)
+        min_px = _pt_to_px(SESSION_NAME_MIN_PT, W)
+
+        title_font = _fit_text_font(draw, session_name, max_title_width, ideal_px, min_px, bold=True)
+        # If even at the minimum size it doesn't fit on one line, wrap it
+        # rather than shrinking past the 16pt floor.
+        if _text_width(draw, session_name, title_font) > max_title_width:
+            title_font = _font(min_px, bold=True)
+            lines = _wrap_to_fit(draw, session_name, title_font, max_title_width)
+        else:
+            lines = [session_name]
+
+        line_y = canvas_top + int(H * 0.005)
+        line_height = 0
+        for line in lines[:2]:  # cap at 2 lines to keep layout predictable
+            bbox = draw.textbbox((0, 0), line, font=title_font)
+            line_height = bbox[3] - bbox[1]
+            draw.text((int(W * 0.03), line_y), line, font=title_font, fill=title_theme.primary_color)
+            line_y += int(line_height * 1.25)
+
+        title_reserved_height = (line_y - canvas_top) + int(H * 0.01)
 
     meta_parts = [p for p in [hall_name, date_str] if p]
     if meta_parts:
         meta_text = "   |   ".join(meta_parts)
-        meta_font = _font(16)
-        draw.text((int(W * 0.03), canvas_top + 38), meta_text, font=meta_font, fill=(220, 220, 230, 255))
+        meta_font = _font(_pt_to_px(META_LINE_PT, W))
+        draw.text((int(W * 0.03), canvas_top + title_reserved_height), meta_text,
+                   font=meta_font, fill=title_theme.secondary_color)
+        meta_bbox = draw.textbbox((0, 0), meta_text, font=meta_font)
+        title_reserved_height += (meta_bbox[3] - meta_bbox[1]) + int(H * 0.015)
+
+    speaker_area_top = canvas_top + title_reserved_height
+    canvas_height = H - speaker_area_top
 
     # --- Speaker slots ---
+    name_font = _font(_pt_to_px(SPEAKER_NAME_PT, W), bold=True)
+    caption_font = _font(_pt_to_px(TITLE_COMPANY_PT, W), bold=False)
+    role_font = _font(_pt_to_px(ROLE_LABEL_PT, W), bold=True)
+
     for slot, speaker in zip(slots, speakers):
         slot_x = int(slot.x * W)
         slot_y = speaker_area_top + int(slot.y * canvas_height)
@@ -168,37 +308,51 @@ def compose_slide(
         slot_h = int(slot.h * canvas_height)
 
         role_text = speaker.role_label or slot.role_label
-        photo_top = slot_y
-        if role_text:
-            role_font = _font(18, bold=True)
-            bbox = draw.textbbox((0, 0), role_text, font=role_font)
-            draw.text(
-                (slot_x + slot_w / 2 - (bbox[2] - bbox[0]) / 2, slot_y),
-                role_text, font=role_font, fill=ROLE_LABEL_COLOR,
-            )
-            photo_top = slot_y + (bbox[3] - bbox[1]) + 10
 
-        photo_h = slot_h - (photo_top - slot_y)
+        # Reserve a portion of the slot's allotted height for the photo and
+        # leave the rest for the caption stack (name + title + company),
+        # so captions never spill past this slot's space into the next row.
+        role_extra_h = 0
+        role_bbox = None
+        if role_text:
+            role_bbox = draw.textbbox((0, 0), role_text, font=role_font)
+            role_extra_h = (role_bbox[3] - role_bbox[1]) + int(H * 0.012)
+
+        caption_reserve_h = int(slot_h * 0.34)  # name + title + company + gaps
+        photo_h = slot_h - role_extra_h - caption_reserve_h
+        photo_top = slot_y + role_extra_h
+
+        if role_text:
+            draw.text(
+                (slot_x + slot_w / 2 - (role_bbox[2] - role_bbox[0]) / 2, slot_y),
+                role_text, font=role_font, fill=caption_theme.role_label_color,
+            )
 
         if speaker.photo is not None:
             masked = _apply_mask_shape(speaker.photo, slot_shape, slot_w, int(photo_h))
             canvas.paste(masked, (slot_x, int(photo_top)), masked)
 
-        caption_y = photo_top + photo_h + CAPTION_GAP_PX
+        caption_y = photo_top + photo_h + caption_gap_px
         center_x = slot_x + slot_w / 2
+        caption_max_width = int(slot_w * 0.96)
 
+        # Speaker name: bold, vibrant theme-aware accent color, larger than caption text
         used_h = _draw_centered_text(
-            draw, speaker.name, center_x, caption_y, slot_w, 22, 14, TEXT_COLOR, bold=True
+            draw, speaker.name, center_x, caption_y, name_font, caption_theme.name_accent_color,
+            max_width=caption_max_width, bold=True,
         )
-        caption_y += used_h + NAME_TO_TITLE_GAP_PX
+        caption_y += used_h + name_to_title_gap_px
 
+        # Title + Company: regular weight, plain theme-aware (light/dark) color, smaller than name
         used_h = _draw_centered_text(
-            draw, speaker.title, center_x, caption_y, slot_w, 16, 11, (210, 210, 220, 255)
+            draw, speaker.title, center_x, caption_y, caption_font, caption_theme.caption_color,
+            max_width=caption_max_width, bold=False,
         )
-        caption_y += used_h + TITLE_TO_COMPANY_GAP_PX
+        caption_y += used_h + title_to_company_gap_px
 
         _draw_centered_text(
-            draw, speaker.company, center_x, caption_y, slot_w, 16, 11, (210, 210, 220, 255)
+            draw, speaker.company, center_x, caption_y, caption_font, caption_theme.caption_color,
+            max_width=caption_max_width, bold=False,
         )
 
     return canvas
