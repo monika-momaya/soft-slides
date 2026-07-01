@@ -17,7 +17,7 @@ from core.photo_processor import process_photo
 from core.slide_compositor import compose_slide, SpeakerInfo
 from core.speaker_sheet import read_speaker_sheet, DEFAULT_ROLE_LABEL
 from core.name_matcher import match_photos_to_speakers
-from core.pptx_compositor import new_presentation, build_pptx_slide, save_pptx
+from core.pptx_compositor import new_presentation, build_pptx_slide, add_slide, save_pptx
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -285,8 +285,6 @@ output_format = st.radio(
 
 if st.button("✨ Generate Slide", disabled=not ready, type="primary"):
     try:
-        layout_slots = get_layout(len(st.session_state.processed_speakers))
-
         if output_format.startswith("PowerPoint"):
             speaker_dicts = [
                 {
@@ -296,8 +294,8 @@ if st.button("✨ Generate Slide", disabled=not ready, type="primary"):
                 for sp in st.session_state.processed_speakers
             ]
             prs = new_presentation()
-            build_pptx_slide(
-                prs, template=template_img, slot_shape=slot_shape, slots=layout_slots,
+            add_slide(
+                prs, template=template_img, slot_shape=slot_shape,
                 speakers=speaker_dicts, session_name=session_name,
                 hall_name=hall_name, date_str=date_str,
             )
@@ -306,6 +304,7 @@ if st.button("✨ Generate Slide", disabled=not ready, type="primary"):
             st.session_state.final_pptx_bytes = pptx_buf.getvalue()
             st.session_state.final_slide = None
         else:
+            layout_slots = get_layout(len(st.session_state.processed_speakers))
             speaker_infos = [
                 SpeakerInfo(
                     name=sp["name"], title=sp["title"], company=sp["company"],

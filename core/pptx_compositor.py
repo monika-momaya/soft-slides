@@ -384,3 +384,210 @@ def build_pptx_slide(
 
 def save_pptx(prs: Presentation, output_path: str):
     prs.save(output_path)
+
+
+# ---------------------------------------------------------------------------
+# TWO-ZONE RAIL LAYOUT (Moderator/Chair left, Speakers/Panelists right)
+# ---------------------------------------------------------------------------
+
+def _render_speaker_block(slide, sp, slot, speaker_area_top_in, speaker_area_height_in,
+                           px_to_in, slot_shape, caption_theme, name_pt):
+    """
+    Renders one speaker's photo + caption block (role label, photo, name,
+    title/company) at the position defined by `slot` (a RailSlot with
+    normalized coordinates). Shared by both the rail and panel zones.
+    """
+    from core.rail_layout import RailSlot
+    slot_x_in = slot.x * SLIDE_WIDTH_IN
+    slot_y_in = speaker_area_top_in + slot.y * speaker_area_height_in
+    slot_w_in = slot.w * SLIDE_WIDTH_IN
+    slot_h_in = slot.h * speaker_area_height_in
+
+    role_text = sp.get("role", "")
+    show_role = role_text and role_text.strip().lower() not in DEFAULT_LABEL_VALUES_TO_HIDE
+
+    role_reserved_in = 0.0
+    if show_role:
+        role_height_in = 0.25
+        _add_text_box(
+            slide, slot_x_in, slot_y_in, slot_w_in, role_height_in,
+            role_text, ROLE_LABEL_PT, bold=True, color_tuple=caption_theme.role_label_color,
+            align=PP_ALIGN.CENTER,
+        )
+        role_reserved_in = role_height_in
+
+    caption_reserve_in = slot_h_in * 0.34
+    photo_h_in = slot_h_in - role_reserved_in - caption_reserve_in
+    photo_top_in = slot_y_in + role_reserved_in
+
+    if sp.get("photo") is not None:
+        photo_w_px = max(1, int(slot_w_in / px_to_in))
+        photo_h_px = max(1, int(photo_h_in / px_to_in))
+        masked = _apply_mask_shape(sp["photo"], slot_shape, photo_w_px, photo_h_px)
+        photo_stream = _save_pil_image_to_stream(masked, preserve_alpha=True)
+        slide.shapes.add_picture(
+            photo_stream, Inches(slot_x_in), Inches(photo_top_in),
+            width=Inches(slot_w_in), height=Inches(photo_h_in),
+        )
+
+    caption_y_in = photo_top_in + photo_h_in + 0.04
+    caption_max_width_in = slot_w_in * 0.96
+
+    name_height_in = 0.3
+    _add_text_box(
+        slide, slot_x_in, caption_y_in, slot_w_in, name_height_in,
+        sp["name"], name_pt, bold=True, color_tuple=caption_theme.name_accent_color,
+        align=PP_ALIGN.CENTER,
+    )
+    caption_y_in += name_height_in - 0.06
+
+    title_company_text = _build_title_company_lines(
+        sp.get("title", ""), sp.get("company", ""), caption_max_width_in, TITLE_COMPANY_PT,
+    )
+    if title_company_text:
+        line_count = title_company_text.count("\n") + 1
+        box_height_in = 0.22 * line_count
+        _add_multiline_text_box(
+            slide, slot_x_in, caption_y_in, slot_w_in, box_height_in,
+            title_company_text, TITLE_COMPANY_PT, bold=False,
+            color_tuple=caption_theme.caption_color, align=PP_ALIGN.CENTER,
+        )
+
+
+def build_pptx_slide_rail(
+    prs: Presentation,
+    template: Image.Image,
+    slot_shape: SlotShape,
+    rail_speakers: list,
+    panel_speakers: list,
+    rail_layout,
+    session_name: str = "",
+    hall_name: str = "",
+    date_str: str = "",
+) -> object:
+    """
+    Builds one PPTX slide using the two-zone rail layout (Moderator/Chair
+    on the left, Speakers/Panelists on the right under their heading).
+    Called by add_slide() when the session has a Moderator/Chair.
+    """
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    bg_stream = _save_pil_image_to_stream(template)
+    slide.shapes.add_picture(bg_stream, 0, 0, width=prs.slide_width, height=prs.slide_height)
+
+    W_px, H_px = template.size
+    px_to_in = SLIDE_WIDTH_IN / W_px
+
+    canvas_top_in = H_px * CANVAS_TOP_RATIO * px_to_in
+
+    title_theme = detect_theme(template, (0, int(H_px * CANVAS_TOP_RATIO), W_px, min(H_px, int(H_px * (CANVAS_TOP_RATIO + 0.12)))))
+    caption_theme = detect_theme(template, (0, int(H_px * (CANVAS_TOP_RATIO + 0.15)), W_px, H_px))
+
+    # --- Session title and meta ---
+    title_reserved_in = 0.0
+    if session_name:
+        max_title_width_in = SLIDE_WIDTH_IN * 0.94
+        title_pt = _fit_font_pt(session_name, max_title_width_in, SESSION_NAME_IDEAL_PT, SESSION_NAME_MIN_PT, bold=True)
+        title_height_in = 0.40
+        _add_text_box(
+            slide, SLIDE_WIDTH_IN * 0.03, canvas_top_in, max_title_width_in, title_height_in,
+            session_name, title_pt, bold=True, color_tuple=title_theme.primary_color,
+            align=PP_ALIGN.LEFT,
+        )
+        title_reserved_in = title_height_in + 0.03
+
+    meta_parts = [p for p in [hall_name, date_str] if p]
+    if meta_parts:
+        meta_text = "   |   ".join(meta_parts)
+        _add_text_box(
+            slide, SLIDE_WIDTH_IN * 0.03, canvas_top_in + title_reserved_in,
+            SLIDE_WIDTH_IN * 0.9, 0.3, meta_text, META_LINE_PT, bold=False,
+            color_tuple=title_theme.secondary_color, align=PP_ALIGN.LEFT,
+        )
+        title_reserved_in += 0.32
+
+    speaker_area_top_in = canvas_top_in + title_reserved_in
+    speaker_area_height_in = SLIDE_HEIGHT_IN - speaker_area_top_in
+
+    # Compute shared name sizes separately for rail (larger) and panel (smaller)
+    from core.rail_layout import RAIL_W_RATIO, PANELIST_ZONE_W
+    rail_caption_w = RAIL_W_RATIO * SLIDE_WIDTH_IN * 0.92 * 0.96
+    panel_slot_w = (PANELIST_ZONE_W / 3) * SLIDE_WIDTH_IN * 0.92 * 0.96
+
+    rail_name_pt = _shared_name_font_pt(
+        [sp["name"] for sp in rail_speakers], rail_caption_w, SPEAKER_NAME_PT + 2, SPEAKER_NAME_PT * 0.6,
+    )
+    panel_name_pt = _shared_name_font_pt(
+        [sp["name"] for sp in panel_speakers], panel_slot_w, SPEAKER_NAME_PT, SPEAKER_NAME_PT * 0.6,
+    ) if panel_speakers else SPEAKER_NAME_PT
+
+    # --- Left rail: render Moderator/Chair speakers ---
+    for sp, slot in zip(rail_speakers, rail_layout.rail_slots):
+        _render_speaker_block(
+            slide, sp, slot, speaker_area_top_in, speaker_area_height_in,
+            px_to_in, slot_shape, caption_theme, rail_name_pt,
+        )
+
+    # --- Right zone heading (SPEAKERS / PANELISTS) ---
+    if panel_speakers:
+        heading_y_in = speaker_area_top_in + rail_layout.heading_y * speaker_area_height_in
+        from core.rail_layout import PANELIST_ZONE_X
+        _add_text_box(
+            slide,
+            PANELIST_ZONE_X * SLIDE_WIDTH_IN, heading_y_in,
+            PANELIST_ZONE_W * SLIDE_WIDTH_IN, 0.35,
+            rail_layout.panel_heading, ROLE_LABEL_PT + 1, bold=True,
+            color_tuple=caption_theme.role_label_color,
+            align=PP_ALIGN.LEFT,
+        )
+
+        # --- Right zone: render panel speakers ---
+        for sp, slot in zip(panel_speakers, rail_layout.panel_slots):
+            _render_speaker_block(
+                slide, sp, slot, speaker_area_top_in, speaker_area_height_in,
+                px_to_in, slot_shape, caption_theme, panel_name_pt,
+            )
+
+    return slide
+
+
+def add_slide(
+    prs: Presentation,
+    template: Image.Image,
+    slot_shape: SlotShape,
+    speakers: list,
+    session_name: str = "",
+    hall_name: str = "",
+    date_str: str = "",
+) -> object:
+    """
+    SMART DISPATCHER: adds one slide to `prs`, automatically choosing
+    between the two-zone rail layout and the standard full-width grid.
+
+    Rule:
+    - Any Moderator/Chair role present AND at least one non-priority
+      speaker → two-zone rail layout.
+    - Otherwise → standard full-width grid.
+
+    This is the function callers should use. build_pptx_slide() and
+    build_pptx_slide_rail() are the underlying implementations.
+    """
+    from core.rail_layout import should_use_rail_layout, split_speakers, compute_rail_layout
+    from core.layout_engine import get_layout
+
+    if should_use_rail_layout(speakers):
+        rail_speakers, panel_speakers = split_speakers(speakers)
+        layout = compute_rail_layout(rail_speakers, panel_speakers)
+        return build_pptx_slide_rail(
+            prs, template=template, slot_shape=slot_shape,
+            rail_speakers=rail_speakers, panel_speakers=panel_speakers,
+            rail_layout=layout,
+            session_name=session_name, hall_name=hall_name, date_str=date_str,
+        )
+    else:
+        slots = get_layout(len(speakers))
+        return build_pptx_slide(
+            prs, template=template, slot_shape=slot_shape, slots=slots,
+            speakers=speakers, session_name=session_name,
+            hall_name=hall_name, date_str=date_str,
+        )
