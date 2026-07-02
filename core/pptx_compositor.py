@@ -281,7 +281,7 @@ def build_pptx_slide(
     if session_name:
         max_title_width_in = SLIDE_WIDTH_IN * 0.94
         title_pt = _fit_font_pt(session_name, max_title_width_in, SESSION_NAME_IDEAL_PT, SESSION_NAME_MIN_PT, bold=True)
-        title_height_in = 0.75
+        title_height_in = 0.55
         _add_text_box(
             slide, SLIDE_WIDTH_IN * 0.03, canvas_top_in, max_title_width_in, title_height_in,
             session_name, title_pt, bold=True, color_tuple=title_theme.primary_color,
@@ -290,7 +290,7 @@ def build_pptx_slide(
         # Tight, near single-line-spacing gap before the hall/date line -
         # was 0.55in (way too much vertical air), now just enough to clear
         # the title's own descenders.
-        title_reserved_in = title_height_in + 0.03
+        title_reserved_in = title_height_in + 0.01
 
     meta_parts = [p for p in [hall_name, date_str] if p]
     if meta_parts:
@@ -300,7 +300,7 @@ def build_pptx_slide(
             SLIDE_WIDTH_IN * 0.9, 0.3, meta_text, META_LINE_PT, bold=False,
             color_tuple=title_theme.secondary_color, align=PP_ALIGN.LEFT,
         )
-        title_reserved_in += 0.32
+        title_reserved_in += 0.26
 
     speaker_area_top_in = canvas_top_in + title_reserved_in
     speaker_area_height_in = SLIDE_HEIGHT_IN - speaker_area_top_in
@@ -336,8 +336,13 @@ def build_pptx_slide(
             )
             role_reserved_in = role_height_in
 
-        caption_reserve_in = slot_h_in * 0.34
-        photo_h_in = slot_h_in - role_reserved_in - caption_reserve_in
+        # Caption reserve: name (0.24in) + title/company (up to 2 lines × 0.30in)
+        # = ~0.84in minimum. Use whichever is larger: 40% of slot or the fixed min.
+        # This prevents compact 3-row layouts from having a reserve too small to
+        # fit even one line of title text, which caused the clipping bug.
+        CAPTION_RESERVE_MIN_IN = 0.80
+        caption_reserve_in = max(slot_h_in * 0.40, CAPTION_RESERVE_MIN_IN)
+        photo_h_in = max(0.3, slot_h_in - role_reserved_in - caption_reserve_in)
         photo_top_in = slot_y_in + role_reserved_in
 
         if sp.get("photo") is not None:
@@ -372,7 +377,7 @@ def build_pptx_slide(
         )
         if title_company_text:
             line_count = title_company_text.count("\n") + 1
-            box_height_in = 0.22 * line_count
+            box_height_in = 0.30 * line_count
             _add_multiline_text_box(
                 slide, slot_x_in, caption_y_in, slot_w_in, box_height_in,
                 title_company_text, TITLE_COMPANY_PT, bold=False,
@@ -416,8 +421,9 @@ def _render_speaker_block(slide, sp, slot, speaker_area_top_in, speaker_area_hei
         )
         role_reserved_in = role_height_in
 
-    caption_reserve_in = slot_h_in * 0.34
-    photo_h_in = slot_h_in - role_reserved_in - caption_reserve_in
+    CAPTION_RESERVE_MIN_IN = 0.80
+    caption_reserve_in = max(slot_h_in * 0.40, CAPTION_RESERVE_MIN_IN)
+    photo_h_in = max(0.3, slot_h_in - role_reserved_in - caption_reserve_in)
     photo_top_in = slot_y_in + role_reserved_in
 
     if sp.get("photo") is not None:
@@ -446,7 +452,7 @@ def _render_speaker_block(slide, sp, slot, speaker_area_top_in, speaker_area_hei
     )
     if title_company_text:
         line_count = title_company_text.count("\n") + 1
-        box_height_in = 0.22 * line_count
+        box_height_in = 0.30 * line_count
         _add_multiline_text_box(
             slide, slot_x_in, caption_y_in, slot_w_in, box_height_in,
             title_company_text, TITLE_COMPANY_PT, bold=False,
@@ -488,13 +494,13 @@ def build_pptx_slide_rail(
     if session_name:
         max_title_width_in = SLIDE_WIDTH_IN * 0.94
         title_pt = _fit_font_pt(session_name, max_title_width_in, SESSION_NAME_IDEAL_PT, SESSION_NAME_MIN_PT, bold=True)
-        title_height_in = 0.75
+        title_height_in = 0.55
         _add_text_box(
             slide, SLIDE_WIDTH_IN * 0.03, canvas_top_in, max_title_width_in, title_height_in,
             session_name, title_pt, bold=True, color_tuple=title_theme.primary_color,
             align=PP_ALIGN.LEFT,
         )
-        title_reserved_in = title_height_in + 0.03
+        title_reserved_in = title_height_in + 0.01
 
     meta_parts = [p for p in [hall_name, date_str] if p]
     if meta_parts:
@@ -504,7 +510,7 @@ def build_pptx_slide_rail(
             SLIDE_WIDTH_IN * 0.9, 0.3, meta_text, META_LINE_PT, bold=False,
             color_tuple=title_theme.secondary_color, align=PP_ALIGN.LEFT,
         )
-        title_reserved_in += 0.32
+        title_reserved_in += 0.26
 
     speaker_area_top_in = canvas_top_in + title_reserved_in
     speaker_area_height_in = SLIDE_HEIGHT_IN - speaker_area_top_in
@@ -529,6 +535,7 @@ def build_pptx_slide_rail(
         )
 
     # --- Right zone heading (SPEAKERS / PANELISTS) ---
+    # Centered over the full right zone width, not left-pinned to its start edge
     if panel_speakers:
         heading_y_in = speaker_area_top_in + rail_layout.heading_y * speaker_area_height_in
         from core.rail_layout import PANELIST_ZONE_X
@@ -538,7 +545,7 @@ def build_pptx_slide_rail(
             PANELIST_ZONE_W * SLIDE_WIDTH_IN, 0.35,
             rail_layout.panel_heading, ROLE_LABEL_PT + 1, bold=True,
             color_tuple=caption_theme.role_label_color,
-            align=PP_ALIGN.LEFT,
+            align=PP_ALIGN.CENTER,
         )
 
         # --- Right zone: render panel speakers ---

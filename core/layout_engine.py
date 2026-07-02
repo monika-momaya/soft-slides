@@ -107,6 +107,18 @@ LAYOUTS = {
         Slot(x=0.50, y=0.52, w=0.23, h=0.42),
         Slot(x=0.745, y=0.52, w=0.23, h=0.42),
     ],
+    9: [
+        # 3 rows of 3, full slide width — matches the rail layout's right-zone style
+        Slot(x=0.02, y=0.02, w=0.31, h=0.28),
+        Slot(x=0.345, y=0.02, w=0.31, h=0.28),
+        Slot(x=0.675, y=0.02, w=0.31, h=0.28),
+        Slot(x=0.02, y=0.35, w=0.31, h=0.28),
+        Slot(x=0.345, y=0.35, w=0.31, h=0.28),
+        Slot(x=0.675, y=0.35, w=0.31, h=0.28),
+        Slot(x=0.02, y=0.68, w=0.31, h=0.28),
+        Slot(x=0.345, y=0.68, w=0.31, h=0.28),
+        Slot(x=0.675, y=0.68, w=0.31, h=0.28),
+    ],
 }
 
 MAX_SUPPORTED = max(LAYOUTS.keys())
