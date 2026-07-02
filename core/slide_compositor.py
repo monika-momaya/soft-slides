@@ -53,8 +53,8 @@ TITLE_TO_COMPANY_GAP_RATIO = 0.0
 REFERENCE_WIDTH_PX = 1280   # PowerPoint 16:9 standard slide width at 96 DPI
 PT_TO_PX_AT_REFERENCE = 1.3333  # 96 DPI: 1pt = 1.3333px, same convention as PowerPoint/web
 
-SESSION_NAME_IDEAL_PT = 20
-SESSION_NAME_MIN_PT = 16
+SESSION_NAME_IDEAL_PT = 36
+SESSION_NAME_MIN_PT = 24
 META_LINE_PT = 13
 
 SPEAKER_NAME_PT = 18        # "4pt larger than title/company" -> title/company = 14pt

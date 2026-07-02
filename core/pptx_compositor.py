@@ -281,7 +281,7 @@ def build_pptx_slide(
     if session_name:
         max_title_width_in = SLIDE_WIDTH_IN * 0.94
         title_pt = _fit_font_pt(session_name, max_title_width_in, SESSION_NAME_IDEAL_PT, SESSION_NAME_MIN_PT, bold=True)
-        title_height_in = 0.40
+        title_height_in = 0.75
         _add_text_box(
             slide, SLIDE_WIDTH_IN * 0.03, canvas_top_in, max_title_width_in, title_height_in,
             session_name, title_pt, bold=True, color_tuple=title_theme.primary_color,
@@ -488,7 +488,7 @@ def build_pptx_slide_rail(
     if session_name:
         max_title_width_in = SLIDE_WIDTH_IN * 0.94
         title_pt = _fit_font_pt(session_name, max_title_width_in, SESSION_NAME_IDEAL_PT, SESSION_NAME_MIN_PT, bold=True)
-        title_height_in = 0.40
+        title_height_in = 0.75
         _add_text_box(
             slide, SLIDE_WIDTH_IN * 0.03, canvas_top_in, max_title_width_in, title_height_in,
             session_name, title_pt, bold=True, color_tuple=title_theme.primary_color,

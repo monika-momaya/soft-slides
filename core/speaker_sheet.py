@@ -100,6 +100,31 @@ def _safe_str(value) -> str:
     return str(value).strip()
 
 
+# Legacy Y/N values that should map to "Moderator" (backward compatibility
+# with sheets created before the free-text Role column was introduced).
+_LEGACY_YES_VALUES = {"y", "yes", "true", "1"}
+_LEGACY_NO_VALUES = {"n", "no", "false", "0"}
+
+
+def _normalize_role(raw: str) -> str:
+    """
+    Normalizes a raw role cell value:
+    - Legacy "Y"/"Yes" → "Moderator" (backward compat with old Moderator Y/N sheets)
+    - Legacy "N"/"No"/"" → "" (will become DEFAULT_ROLE_LABEL downstream)
+    - Any other non-empty text → returned as-is (free-text role, e.g. "Chair",
+      "Chief Guest", "Keynote Speaker", "Event Inauguration by", etc.)
+    This ensures the transition from the old Y/N column to free-text Role
+    doesn't silently display "Y" as a label on the LED screen.
+    """
+    stripped = raw.strip()
+    lower = stripped.lower()
+    if lower in _LEGACY_YES_VALUES:
+        return "Moderator"
+    if lower in _LEGACY_NO_VALUES or not stripped:
+        return ""
+    return stripped  # free-text role used verbatim
+
+
 def read_speaker_sheet(file_path_or_buffer) -> List[Dict]:
     """
     Reads the uploaded Excel file and returns a list of speaker dicts:
@@ -134,7 +159,14 @@ def read_speaker_sheet(file_path_or_buffer) -> List[Dict]:
 
         title = _safe_str(row.get(mapping["title"])) if mapping["title"] else ""
         company = _safe_str(row.get(mapping["company"])) if mapping["company"] else ""
-        role = _safe_str(row.get(mapping["role"])) if mapping["role"] else ""
+        role_raw = _safe_str(row.get(mapping["role"])) if mapping["role"] else ""
+
+        # Backward-compatibility: sheets created before the free-text Role
+        # column was introduced may still have "Y"/"N" (or "Yes"/"No") in
+        # the Moderator column. Map these gracefully rather than displaying
+        # a literal "Y" label on the LED screen, which was a real bug seen
+        # in production.
+        role = _normalize_role(role_raw)
 
         speakers.append({
             "name": name,
